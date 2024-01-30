@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed Jan 24 14:54:55 2024
+A script to perform pre-processing, forward modelling and beamforming on
+EEG BrainVision files. The script requires a FreeSurfer anatomical 
+reconstruction for the subject, or alternatively, just use fsaverage
+for testing purposes.
 
-@author: ppysc6
+@author: Sebastian C. Coleman, ppysc6@nottingham.ac.uk
 """
 
 import os
