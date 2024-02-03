@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 A script to perform pre-processing, forward modelling and beamforming on
-EEG BrainVision files. The script requires a FreeSurfer anatomical 
-reconstruction for the subject, or alternatively, just use fsaverage
-for testing purposes.
+BrainVision EEG files. The script requires a FreeSurfer reconstruction, or
+use FSaverage (as it is set here) for testing purposes.
+
+For actual study usage, it is recommended to split this script into several
+parts, e.g. pre-processing, forward model, source reconstruction.
 
 @author: Sebastian C. Coleman, ppysc6@nottingham.ac.uk
 """
 
 import os
 import os.path as op
-
 import numpy as np
 import mne
-from mne_bids import BIDSPath, read_raw_bids, inspect_dataset
 from matplotlib import pyplot as plt
 import mne.datasets
 import pandas as pd
@@ -47,7 +47,10 @@ if not op.exists(source_out):
 data = mne.io.read_raw_brainvision(op.join(data_path,subject,fname + '.vhdr'),
                                    preload=True)
 data.info
-
+data_raw = data.copy()  # these lines are added to maintain a copy of the data
+                        # at each step - useful for debugging.
+                        
+### events from marker file
 events = mne.events_from_annotations(data)[0]
 mne.viz.plot_events(events)
 
@@ -56,96 +59,124 @@ mne.viz.plot_events(events)
 montage = mne.channels.make_standard_montage("easycap-M1")
 montage.plot()
 data.set_montage(montage, on_missing="ignore")
+data_montage = data.copy()
 
-#%% basic preprocessing
+#%% remove ECG
 
-# remove ECG (comment out if using this)
 data.drop_channels("ECG")
 
-# set reference 
-data.set_eeg_reference('average')
+#%% downsample
 
-orig_freq = 1000
-sfreq = 250
-data_ds = data.copy().resample(sfreq=sfreq)
+orig_freq = data.info["sfreq"]
+sfreq = 500
+data.resample(sfreq=sfreq)
+data_ds = data.copy()
+
+### manually downsample events
 events[:,0] = np.round(events[:,0] * (sfreq/orig_freq))
-data_filt = data_ds.copy().filter(l_freq=1, h_freq=48)
-data_filt.plot_psd(fmax=48, picks='eeg').show()
 
-#%%  ICA
+#%% broadband filter
 
-data_ica = data_filt.copy()
+data.filter(l_freq=1, h_freq=150)
+data_broadband = data.copy()
+
+#%% plot data and left click any bad channels
+
+data.plot()
+
+#%% set average reference
+
+data.set_eeg_reference('average', projection=True)
+data_ref = data.copy()
+
+#%% plot PSD
+
+data.plot_psd(fmax=48, picks='eeg').show()
+
+#%% fit ICA, CLICK ON BAD COMPONENT TIMECOURSES TO MARK AS BAD
+
 ica = mne.preprocessing.ICA(n_components=20)
-ica.fit(data_ica.pick_types(eeg=True))
+ica.fit(data.pick_types(eeg=True))
 ica.plot_components()
-ica.plot_sources(data_ica)
+ica.plot_sources(data)
 
-#%% remove ICA
+#%% apply ICA 
 
-ica.exclude = [0, 7]   # CHANGE THESE TO ECG/CARDIAC COMPONENTS
-ica.apply(data_ica)
+ica.apply(data)
+data_ica = data.copy()
 
 #%% annotate muscle artifacts
 
-data_annot = data_ica.copy()
 threshold_muscle = 20  # z-score
 annot_muscle, scores_muscle = mne.preprocessing.annotate_muscle_zscore(
-    data_annot,
+    data,
     threshold=threshold_muscle,   # zscore
     ch_type = "eeg",
     min_length_good=2,
-    filter_freq=(50, 80)
+    filter_freq=(100, 130)
 )
 
 fig, ax = plt.subplots()
-ax.plot(data_annot.times, scores_muscle)
+ax.plot(data.times, scores_muscle)
 ax.axhline(y=threshold_muscle, color="r")
 ax.set(xlabel="time, (s)", ylabel="zscore", title="Muscle activity")
 
-data_annot.set_annotations(annot_muscle)
+#%% set bad muscle annotations IF HAPPY WITH THRESHOLDING ABOVE
 
-#%% set proper montage using .pos file
+data.set_annotations(annot_muscle)
+data_muscle = data.copy()
 
-elec_names = np.array(["Fp1","Fpz","Fp2","AF7","AF3","AF4","AF8","F7","F5","F3","F1",
-    "Fz","F2","F4","F6","F8","FT7","FC5","FC3","FC1","FC2","FC4","FC6","FT8",
-    "T7","C5","C3","C1","Cz","C2","C4","C6","T8","TP9","TP7","CP5","CP3",
-    "CP1","CPz","CP2","CP4","CP6","TP8","TP10","P7","P5","P3","P1","Pz","P2",
-    "P4","P6","P8","PO9","PO7","PO3","POz","PO4","PO8","PO10","O1","Oz","O2"])
+#%% set proper montage using .pos file, CREATED FROM AN EINSCAN FILE, MODIFY ACCORDINGLY
+
+elec_names = data_ds.ch_names
 
 # load in pos file to pandas dataframe
-df = pd.read_table(op.join(data_path, subject, subject + '.pos'), names=['point','x','y','z'])
-df = df.drop(df.index[0])
+df = pd.read_table(op.join(data_path, subject, subject + '.pos'), 
+                   names=['point','x','y','z'], delim_whitespace=True)
+pos = df.drop(df.index[0]).to_numpy()
 
-# extract electrodes and fids from dataframe
-fid_positions = df[['x', 'y', 'z']].values[len(df)-3:len(df)] / 100
-fid_labels = df['point'].values[len(df)-3:len(df)]
-n_electrodes = 63
-elec_positions = df[['x', 'y', 'z']].values[len(df)-n_electrodes-3:len(df)-3] / 100
-elec_dict = dict(zip(elec_names,elec_positions))
-head_positions = df[['x', 'y', 'z']].values[0:len(df)-n_electrodes-4] / 100
-head_positions_ds = head_positions[0::100,:]  # heavily downsampled
+# separate pos into fiducials, electrodes and headshape
+# 3 fiducial points at the end
+# 1 points for each channel (63 channels)
+# the rest are headshape points
+
+pos_fids = pos[-3:,1:] / 100  # change units to m for MNE
+pos_elec = pos[-3-len(elec_names):-3,1:] / 100
+
+pos_head = pos[0::100,1:] / 100   # downsample Einscan by 100 for speed
+
+# divide pos by 100 
+elec_dict = dict(zip(elec_names,pos_elec))
+
+nas = pos_fids[0,:].astype(float)
+lpa = pos_fids[1,:].astype(float)
+rpa = pos_fids[2,:].astype(float)
+hsp = pos_head.astype(float)
 
 # create head digitisation
 digitisation = mne.channels.make_dig_montage(ch_pos=elec_dict, 
-                         nasion=np.squeeze(fid_positions[fid_labels=='nasion ',:]),
-                         lpa=np.squeeze(fid_positions[fid_labels=='left ',:]),
-                         rpa=np.squeeze(fid_positions[fid_labels=='right ',:]),
-                         hsp=head_positions_ds)
+                         nasion=nas,
+                         lpa=lpa,
+                         rpa=rpa,
+                         hsp=hsp)
 
-data_preproc = data_annot.copy()
-data_preproc.set_montage(digitisation, on_missing="ignore")
-data_preproc.save(op.join(preproc_out, "data_preproc_" + task + ".fif"),
+data.set_montage(digitisation, on_missing="ignore")
+data_dig = data.copy()
+
+#%% general preprocessing is now done, save out preproc file
+
+data.save(op.join(preproc_out, "data_preproc_" + task + ".fif"),
                    overwrite=True)
+info = data.info # need this for later sections
 
-#%% epochs
+#%% epoch data based on trigger
 
-#data_preproc = mne.io.Raw(op.join(preproc_out, "data_preproc_" + task + ".fif"))
+#data = mne.io.Raw(op.join(preproc_out, "data_preproc_" + task + ".fif"))
 
 event_id = 65     # trigger of interest
-fband = [8, 13]
 tmin, tmax = 0, 40
 epochs = mne.Epochs(
-    data_preproc,
+    data,
     events,
     event_id,
     tmin,
@@ -154,7 +185,11 @@ epochs = mne.Epochs(
     preload=True,
     reject_by_annotation=True)
 
-epochs_filt = epochs.filter(fband[0], fband[1]).copy()
+#%% prefilter epochs before calculating covariance
+
+fband = [8, 13]
+epochs.filter(fband[0], fband[1])
+epochs_filt = epochs.copy()
 
 #%% compute covariance
 
@@ -190,7 +225,6 @@ mne.gui.coregistration(subjects_dir=subjects_dir, subject=fs_subject, scale_by_d
 #%% visualise coreg
 
 trans = op.join(forward_out, subject + "_" + task + "-trans.fif")
-info = data_preproc.info
 
 mne.viz.plot_alignment(
     info,
@@ -209,7 +243,7 @@ src = mne.setup_source_space(
     fs_subject, spacing="oct5", add_dist=False, subjects_dir=subjects_dir)
 src.plot(subjects_dir=subjects_dir)
 
-#%% forward solution
+#%% Calculate lead field using 3 layer model
 
 conductivity = (0.3, 0.006, 0.3)
 model = mne.make_bem_model(
@@ -229,19 +263,19 @@ fwd = mne.make_forward_solution(
     )
 print(fwd)
 
-#%% spatial filter
+#%% calculate beamformer weights (spatial filter)
 
 filters = mne.beamformer.make_lcmv(
     info,
     fwd,
     all_cov,
-    reg=0.05,
+    reg=0.05,  # 5% regularisation
     noise_cov=None,
     pick_ori="max-power",
     weight_norm="unit-noise-gain",
     rank=None)
 
-#%% apply filter to covariance for static sourcemap
+#%% apply beamformer wweights to covariance for static sourcemap
  
 stc_active = mne.beamformer.apply_lcmv_cov(active_cov, filters)
 stc_base = mne.beamformer.apply_lcmv_cov(control_cov, filters)
@@ -255,8 +289,7 @@ stc_change.plot(src=src, subject=fs_subject,
 
 #%% apply beamformer to filtered raw data for timecourse extraction
  
-stc_raw = mne.beamformer.apply_lcmv_raw(data_preproc.set_eeg_reference('average',
-                                                     projection=True), filters)
+stc_raw = mne.beamformer.apply_lcmv_raw(data, filters)
  
 #%% extract absolute max voxel TFS/timecourse
  
@@ -283,13 +316,12 @@ source_epochs = mne.Epochs(
  
  
 # TFR
- 
 freqs = np.logspace(*np.log10([6, 35]), num=20)
 n_cycles = freqs/2
 power = mne.time_frequency.tfr_morlet(source_epochs, freqs=freqs, n_cycles=n_cycles,
                                            use_fft=True, picks="all"
                                            )
-power[0].plot(picks="all", baseline=(25, 35))
+power[0].plot(picks="all", baseline=(30, 38))
 
 ### timecourse
 
