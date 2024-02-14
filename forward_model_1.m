@@ -1,3 +1,10 @@
+%%% Script for calculating the forward model for source reconstruction %%%
+%%% of EEG data. Requires a T1 weighted anatomical (.nii) and a        %%%
+%%% digitisation file (.pos) containing headshape, sensor and fiducial %%%
+%%% positions. Applying fslreorient2std to the anatomical before       %%%
+%%% running this script helps segmentation.                            %%%
+%%% Author: Sebastian C. Coleman, ppysc6@nottingham.ac.uk              %%%
+
 clear all
 close all
 
