@@ -1,3 +1,8 @@
+%%% Script for source reconstruction of EEG BrainVision Files.         %%%
+%%% Requires outputs from forward_model_1.m, as well as BrainVision    %%%
+%%% outputs (.eeg, .vmrk, .vhdr).                                      %%%
+%%% Author: Sebastian C. Coleman, ppysc6@nottingham.ac.uk              %%%
+
 clear all
 close all
 
