@@ -1,3 +1,7 @@
+%%% Script for plotting voxel TFS and timecourses using beamformer     %%%
+%%% outputs from lcmv_beamforming_2.m                                  %%%
+%%% Author: Sebastian C. Coleman, ppysc6@nottingham.ac.uk              %%%
+
 clear all
 close all
 
